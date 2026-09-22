@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from queue import Empty, PriorityQueue
@@ -84,6 +85,15 @@ class BaseQueue:
                 "The SeaGOAT worker thread crashed; stopping the server. "
                 "Fix the cause reported above and start the server again."
             )
+            # os._exit skips the interpreter's cleanup, which includes flushing buffered
+            # streams: without these the message above is discarded and the process dies
+            # silently, which is the failure this handler exists to prevent.
+            logging.shutdown()
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except Exception:  # noqa: BLE001 - a closed stream must not mask the crash
+                    pass
             os._exit(WORKER_CRASHED_EXIT_CODE)
 
     def _worker_loop(self):

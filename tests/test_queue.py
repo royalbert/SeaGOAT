@@ -89,3 +89,28 @@ def test_worker_crash_is_logged_and_stops_the_process(mocker, repo, caplog):
     exit_.assert_called_once_with(WORKER_CRASHED_EXIT_CODE)
     assert "worker thread crashed" in caplog.text
     assert "boom during context setup" in caplog.text
+
+
+def test_worker_crash_report_is_flushed_before_the_process_dies(mocker):
+    """os._exit skips the interpreter's cleanup, and that includes flushing buffered streams.
+    Without an explicit flush the crash report logged a line earlier is discarded and the process
+    dies with no message -- the silent death this handler exists to prevent."""
+    from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE, BaseQueue
+
+    order = []
+    mocker.patch(
+        "seagoat.queue.base_queue.logging.shutdown",
+        side_effect=lambda: order.append("flushed"),
+    )
+    mocker.patch(
+        "seagoat.queue.base_queue.os._exit",
+        side_effect=lambda code: order.append(("exited", code)),
+    )
+
+    class Broken(BaseQueue):
+        def _get_context(self):
+            raise RuntimeError("boom during context setup")
+
+    Broken()._worker_thread.join(timeout=5)
+
+    assert order == ["flushed", ("exited", WORKER_CRASHED_EXIT_CODE)]
