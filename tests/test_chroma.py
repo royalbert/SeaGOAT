@@ -411,3 +411,24 @@ async def test_does_not_crash_when_file_lines_are_removed(repo):
     results = await seagoat.query(my_query)
 
     assert results[0].gitfile.path == "devices.txt"
+
+
+@pytest.mark.parametrize(
+    "requested, maximum, expected",
+    [
+        (20, 5000, 20),
+        (0, 5000, 1),
+        (-7, 5000, 1),
+        ("abc", 5000, 1),
+        (None, 5000, 1),
+        (99999, 5000, 256),  # the indexer's own ceiling applies first
+        (5000, 5000, 256),
+        (2000, 100, 100),  # a client limit below the ceiling wins
+        (256, 0, 256),  # no known client maximum: the ceiling still applies
+        (4096, 0, 256),
+    ],
+)
+def test_batch_size_is_clamped_to_a_safe_range(requested, maximum, expected):
+    from seagoat.sources.chroma import _clamp_batch_size
+
+    assert _clamp_batch_size(requested, maximum) == expected
