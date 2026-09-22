@@ -70,3 +70,37 @@ def test_important_files_are_analyzed_first(create_task_queue, mocker, repo):
 
     # the exact order of files should also match the priority list
     assert [file.path for file, _ in repository.top_files()] == order_of_files_analyzed
+
+
+def test_cache_is_persisted_per_batch_not_per_chunk(mocker, repo):
+    """The cache is a pickle of every analyzed chunk id; writing it after every chunk
+    is quadratic in repository size. It should be written when a batch reaches
+    storage, and once more for the final partial batch."""
+    from seagoat.engine import Engine
+
+    repo.add_file_change_commit(
+        file_name="many_lines.py",
+        contents="".join(f"value_{i} = {i}\n" for i in range(50)),
+        author=repo.actors["John Doe"],
+        commit_message="Add a file that spans several batches",
+    )
+    engine = Engine(repo.working_dir)
+    persist = mocker.patch.object(engine.cache, "persist")
+    engine.repository.analyze_files()
+    chunks = [
+        chunk
+        for file, _ in engine.repository.top_files()
+        for chunk in file.get_chunks()
+        if chunk.chunk_id not in engine.cache.data["chunks_already_analyzed"]
+    ]
+    batch_size = engine.config["server"]["chroma"]["batchSize"]
+    assert len(chunks) > batch_size, "fixture repo must span more than one batch"
+
+    for chunk in chunks:
+        engine.process_chunk(chunk)
+    engine.flush()
+
+    full_batches = len(chunks) // batch_size
+    # one persist per full batch that was flushed, plus the final flush
+    assert persist.call_count == full_batches + 1
+    assert persist.call_count < len(chunks)

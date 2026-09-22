@@ -80,20 +80,38 @@ class Engine:
         return self._create_vector_embeddings(minimum_chunks_to_analyze)
 
     def _add_to_collection(self, chunk):
+        """Returns True if a source flushed buffered chunks to storage."""
+        flushed = False
         for source in chain(*self._fetchers.values()):
-            source["cache_chunk"](chunk)
+            if source["cache_chunk"](chunk):
+                flushed = True
+        return flushed
+
+    def flush(self):
+        """Flush every source's buffered chunks and persist the cache once."""
+        for source in chain(*self._fetchers.values()):
+            flush = source.get("flush_batch")
+            if flush is not None:
+                flush()
+        self.cache.persist()
 
     def process_chunk(self, chunk):
         if chunk.chunk_id in self.cache.data["chunks_already_analyzed"]:
             return
 
-        self._add_to_collection(chunk)
+        flushed = self._add_to_collection(chunk)
         self.cache.data["chunks_already_analyzed"].add(chunk.chunk_id)
 
         if chunk.chunk_id in self.cache.data["chunks_not_yet_analyzed"]:
             self.cache.data["chunks_not_yet_analyzed"].remove(chunk.chunk_id)
 
-        self.cache.persist()
+        # Persist the cache when the chunks actually reached storage (once per
+        # batch) rather than after every chunk: the cache is a pickle of every
+        # analyzed id, so rewriting it per chunk is quadratic in the size of the
+        # repository, and persisting before the flush records chunks as analyzed
+        # that are still in memory.
+        if flushed:
+            self.cache.persist()
 
     def _create_vector_embeddings(self, minimum_chunks_to_analyze=None):
         chunks_to_process = []
@@ -116,6 +134,7 @@ class Engine:
         ):
             chunk = chunks_to_process.pop(0)
             self.process_chunk(chunk)
+        self.flush()
 
         for source in chain(*self._fetchers.values()):
             source.get("flush_batch", lambda: None)()

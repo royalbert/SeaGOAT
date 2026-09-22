@@ -97,6 +97,8 @@ class TaskQueue(BaseQueue):
         context["seagoat_engine"].process_chunk(chunk)
 
         if self._task_queue.qsize() == 0:
+            # the last batch may be shorter than batchSize: write it out now
+            context["seagoat_engine"].flush()
             logging.info("Analyzed all chunks!")
 
     def handle_query(self, context, **kwargs):
