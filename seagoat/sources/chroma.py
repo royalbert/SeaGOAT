@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import chromadb
@@ -53,6 +54,40 @@ def format_results(query_text: str, repository, chromadb_results):
     return files.values()
 
 
+# The largest batch the indexer will embed in one call regardless of configuration.
+# Every record in a batch is held in memory with its embedding until the call
+# returns, and measured throughput is flat from 256 upward (the embedding model,
+# not the batch, is the limit past that point), so larger values only cost memory.
+MAX_BATCH_SIZE = 256
+
+
+def _clamp_batch_size(requested, maximum: int) -> int:
+    """Keep the configured batch size inside a safe range.
+
+    A value below 1 would never flush; a value above MAX_BATCH_SIZE or above the
+    Chroma client's per-call limit is capped. Every clamp is logged rather than
+    allowed to take the indexer down.
+    """
+    try:
+        value = int(requested)
+    except (TypeError, ValueError):
+        logging.warning("chroma.batchSize %r is not an integer; using 1", requested)
+        return 1
+    if value < 1:
+        logging.warning("chroma.batchSize %d is below 1; using 1", value)
+        return 1
+    ceiling = min(MAX_BATCH_SIZE, maximum) if maximum else MAX_BATCH_SIZE
+    if value > ceiling:
+        logging.warning(
+            "chroma.batchSize %d exceeds the maximum batch size %d; using %d",
+            value,
+            ceiling,
+            ceiling,
+        )
+        return ceiling
+    return value
+
+
 def initialize(repository: Repository):
     cache = Cache("chroma", Path(repository.path), {})
     config = get_config_values(Path(repository.path))
@@ -74,12 +109,15 @@ def initialize(repository: Repository):
         name="code_data", embedding_function=embedding_function
     )
 
-    batch_size = config["server"]["chroma"]["batchSize"]
+    batch_size = _clamp_batch_size(
+        config["server"]["chroma"]["batchSize"], chroma_client.get_max_batch_size()
+    )
     batch_buffer = {"ids": [], "documents": [], "metadatas": []}
 
     def _flush_batch():
+        """Write the buffered chunks. Returns True if anything was written."""
         if not batch_buffer["ids"]:
-            return
+            return False
         chroma_collection.upsert(
             ids=batch_buffer["ids"],
             documents=batch_buffer["documents"],
@@ -88,6 +126,7 @@ def initialize(repository: Repository):
         batch_buffer["ids"].clear()
         batch_buffer["documents"].clear()
         batch_buffer["metadatas"].clear()
+        return True
 
     def fetch(query_text: str, limit: int):
         # Slightly overfetch results as it will sorted using a different score later
@@ -104,13 +143,16 @@ def initialize(repository: Repository):
     def cache_chunk(chunk):
         batch_buffer["ids"].append(chunk.chunk_id)
         batch_buffer["documents"].append(chunk.chunk)
-        batch_buffer["metadatas"].append({
-            "path": chunk.path,
-            "line": chunk.codeline,
-            "git_object_id": chunk.object_id,
-        })
+        batch_buffer["metadatas"].append(
+            {
+                "path": chunk.path,
+                "line": chunk.codeline,
+                "git_object_id": chunk.object_id,
+            }
+        )
         if len(batch_buffer["ids"]) >= batch_size:
-            _flush_batch()
+            return _flush_batch()
+        return False
 
     def cache_repo():
         # chromadb does not need any repo cache action
