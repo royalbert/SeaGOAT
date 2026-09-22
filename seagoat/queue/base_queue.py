@@ -81,14 +81,24 @@ class BaseQueue:
             # If it dies, the server process stays up but never does anything again
             # and clients only see timeouts. Say what happened and stop the process
             # so the failure is visible and the port is released.
-            logging.exception(
-                "The SeaGOAT worker thread crashed; stopping the server. "
-                "Fix the cause reported above and start the server again."
-            )
+            try:
+                logging.exception(
+                    "The SeaGOAT worker thread crashed; stopping the server. "
+                    "Fix the cause reported above and start the server again."
+                )
+            except Exception:  # noqa: BLE001 - a failing handler must not stop the exit below
+                pass
             # os._exit skips the interpreter's cleanup, which includes flushing buffered
             # streams: without these the message above is discarded and the process dies
-            # silently, which is the failure this handler exists to prevent.
-            logging.shutdown()
+            # silently, which is the failure this handler exists to prevent. Flush the
+            # handlers rather than logging.shutdown(), which CLOSES them -- in a process
+            # that survives this call, such as a test runner, that silences every later
+            # message including the next crash report.
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except Exception:  # noqa: BLE001 - a broken handler must not mask the crash
+                    pass
             for stream in (sys.stdout, sys.stderr):
                 try:
                     stream.flush()

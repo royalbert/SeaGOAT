@@ -1,3 +1,4 @@
+import logging
 from time import sleep
 from unittest.mock import Mock
 
@@ -98,10 +99,16 @@ def test_worker_crash_report_is_flushed_before_the_process_dies(mocker):
     from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE, BaseQueue
 
     order = []
-    mocker.patch(
-        "seagoat.queue.base_queue.logging.shutdown",
-        side_effect=lambda: order.append("flushed"),
-    )
+
+    class _Recording(logging.Handler):
+        def emit(self, record):
+            pass
+
+        def flush(self):
+            order.append("flushed")
+
+    handler = _Recording()
+    logging.getLogger().addHandler(handler)
     mocker.patch(
         "seagoat.queue.base_queue.os._exit",
         side_effect=lambda code: order.append(("exited", code)),
@@ -111,6 +118,11 @@ def test_worker_crash_report_is_flushed_before_the_process_dies(mocker):
         def _get_context(self):
             raise RuntimeError("boom during context setup")
 
-    Broken()._worker_thread.join(timeout=5)
+    try:
+        Broken()._worker_thread.join(timeout=5)
+    finally:
+        logging.getLogger().removeHandler(handler)
 
-    assert order == ["flushed", ("exited", WORKER_CRASHED_EXIT_CODE)]
+    # flushed at least once, and every flush before the exit
+    assert "flushed" in order
+    assert order[-1] == ("exited", WORKER_CRASHED_EXIT_CODE)
