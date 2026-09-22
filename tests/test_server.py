@@ -413,3 +413,67 @@ def test_server_shows_error_when_folder_is_not_a_git_repo(runner_with_error):
         result = runner_with_error.invoke(seagoat_server, ["start", new_directory])
 
     assert result.exit_code == 5
+
+
+def test_server_refuses_to_start_without_ripgrep(repo, mocker):
+    from seagoat.server import ExitCode, start_server
+
+    mocker.patch("seagoat.server.shutil.which", return_value=None)
+    with pytest.raises(SystemExit) as exit_info:
+        start_server(repo.working_dir)
+
+    assert exit_info.value.code == ExitCode.RIPGREP_NOT_FOUND
+
+
+def test_the_server_process_exits_when_its_worker_cannot_work(repo, mocker):
+    """Only the real server ends the process on a fatal worker condition; an app built for
+    anything else leaves the process alone."""
+    from seagoat import server
+
+    # never build the real server's queue here: wired to _exit_process, it would end the test
+    # run as soon as the fixture deletes the repository
+    create_app = mocker.patch("seagoat.server.create_app")
+    mocker.patch("seagoat.server.serve")
+    server.start_server(repo.working_dir)
+    assert create_app.call_args.kwargs["on_fatal"] is server._exit_process
+
+    mocker.stopall()
+    assert (
+        server.create_app(repo.working_dir).extensions["task_queue"]._on_fatal is None
+    )
+
+
+def test_exit_process_flushes_the_report_without_closing_handlers(mocker):
+    """os._exit skips interpreter cleanup, so the crash report must be flushed first, and the
+    handlers flushed rather than closed."""
+    import logging
+
+    from seagoat.server import _exit_process
+
+    order = []
+
+    class _Recording(logging.Handler):
+        def emit(self, record):
+            pass
+
+        def flush(self):
+            order.append("flushed")
+
+        def close(self):
+            order.append("closed")
+            super().close()
+
+    handler = _Recording()
+    logging.getLogger().addHandler(handler)
+    mocker.patch(
+        "seagoat.server.os._exit",
+        side_effect=lambda code: order.append(("exited", code)),
+    )
+    try:
+        _exit_process(7)
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    assert "flushed" in order
+    assert order[-1] == ("exited", 7)
+    assert "closed" not in order
