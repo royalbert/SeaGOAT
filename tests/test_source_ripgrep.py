@@ -1,5 +1,5 @@
 from seagoat.repository import Repository
-from seagoat.sources.ripgrep import initialize
+from seagoat.sources.ripgrep import RipGrepCache, initialize
 from tests.test_ripgrep import pytest
 
 
@@ -84,3 +84,20 @@ b3
         11,
         12,
     }
+
+
+def test_repository_with_nothing_to_cache(tmp_path):
+    # A repository with no cacheable line -- every file unsupported, excluded or over the size
+    # limit -- leaves an empty cache file. Memory mapping one raises ValueError, and the exception
+    # escaped the indexing worker thread: the server stayed up and indexed nothing for the rest of
+    # its life. An empty repository must simply have an empty cache.
+    class _EmptyRepository:
+        path = str(tmp_path)
+
+        def top_files(self):
+            return []
+
+    cache = RipGrepCache(_EmptyRepository())
+    cache.rebuild()
+
+    assert not cache.encode()

@@ -1,5 +1,6 @@
 import logging
 import mmap
+import os
 import platform
 import re
 import subprocess
@@ -85,6 +86,12 @@ class RipGrepCache(str):
             # Use a simple string as a fallback
             with open(self.file_path, encoding="utf-8") as cache_file:
                 self._data = cache_file.read()
+        elif os.path.getsize(self.file_path) == 0:
+            # A repository with nothing to cache -- no supported file, every file excluded, or
+            # every file above MAX_FILE_SIZE -- leaves an empty cache file here, and mmap of an
+            # empty file raises ValueError. That exception escapes the indexing worker thread, so
+            # an empty repository took the whole server down rather than returning no results.
+            self._data = b""
         else:
             with open(self.file_path, "r+b") as cache_file:
                 self._data = mmap.mmap(cache_file.fileno(), 0)
