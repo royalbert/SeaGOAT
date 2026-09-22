@@ -61,3 +61,18 @@ def test_file_reader_does_not_crash_because_of_misdetected_utf8(
         assert content is not None
     finally:
         os.unlink(temp_file.name)
+
+
+def test_file_reader_does_not_crash_on_undecodable_bytes():
+    # A Latin-1 source file: a comment with an accented character, invalid as UTF-8.
+    # chardet reads it as ISO-8859-1 at 0.73 confidence, below the 0.89 threshold, so
+    # the reader falls back to strict UTF-8, which used to raise UnicodeDecodeError out
+    # of the indexing worker thread and leave the server alive but idle.
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+        temp_file.write(b"/* caf\xe9 */\nint x;\n")
+
+    try:
+        content = read_file_with_correct_encoding(temp_file.name)
+        assert "int x;" in content
+    finally:
+        os.unlink(temp_file.name)
