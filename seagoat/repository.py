@@ -21,6 +21,14 @@ def parse_commit_info(raw_line: str):
     return (commit_hash, days_passed, author, commit_subject)
 
 
+class RepositoryGone(Exception):
+    """The repository is no longer there.
+
+    A server outlives the tree it was started on: the directory is deleted or moved while the
+    server still runs. Every git call then fails, and the failure escaped the indexing worker.
+    """
+
+
 class Repository:
     def __init__(self, repo_path: str):
         self.path = Path(repo_path)
@@ -28,15 +36,25 @@ class Repository:
         self.file_changes = defaultdict(list)
         self.frecency_scores = {}
 
+    def _git(self, *args: str) -> str:
+        if not self.path.exists():
+            raise RepositoryGone(f"{self.path} no longer exists")
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(self.path), *args],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except subprocess.CalledProcessError as error:
+            if not self.path.exists():
+                raise RepositoryGone(f"{self.path} no longer exists") from error
+            raise
+
     def _get_head_hash(self):
-        return subprocess.check_output(
-            ["git", "-C", str(self.path), "rev-parse", "HEAD"], text=True
-        ).strip()
+        return self._git("rev-parse", "HEAD")
 
     def _get_working_tree_diff(self):
-        return subprocess.check_output(
-            ["git", "-C", str(self.path), "diff"], text=True
-        ).strip()
+        return self._git("diff")
 
     def _is_file_ignored(self, path: str):
         for pattern in self.config["server"]["ignorePatterns"]:

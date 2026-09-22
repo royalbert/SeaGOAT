@@ -5,7 +5,14 @@ import time
 import orjson
 
 from seagoat import __version__
-from seagoat.queue.base_queue import LOW_PRIORITY, MEDIUM_PRIORITY, BaseQueue
+from seagoat.queue.base_queue import (
+    HIGH_PRIORITY,
+    LOW_PRIORITY,
+    MEDIUM_PRIORITY,
+    BaseQueue,
+    Task,
+)
+from seagoat.repository import RepositoryGone
 
 SECONDS_BETWEEN_MAINTENANCE = 10
 
@@ -52,7 +59,21 @@ class TaskQueue(BaseQueue):
         ):
             return
 
-        current_repo_state_hash = context["seagoat_engine"].repository.get_status_hash()
+        try:
+            current_repo_state_hash = context[
+                "seagoat_engine"
+            ].repository.get_status_hash()
+        except RepositoryGone:
+            # The tree this server was started on is gone, so there is nothing left to index and
+            # nothing to answer queries about. Shut down instead of raising out of the worker on
+            # every maintenance pass.
+            logging.warning(
+                "The repository this server was started on is gone; stopping the server."
+            )
+            self._task_queue.put(
+                Task(priority=HIGH_PRIORITY, name="shutdown", args=(), kwargs={})
+            )
+            return
 
         # Do not re-analyze repo if nothing changed
         if context["last_repo_state_hash"] == current_repo_state_hash:
