@@ -72,19 +72,23 @@ def test_important_files_are_analyzed_first(create_task_queue, mocker, repo):
     assert [file.path for file, _ in repository.top_files()] == order_of_files_analyzed
 
 
-def test_cache_is_persisted_per_batch_not_per_chunk(mocker, repo):
-    """The cache is a pickle of every analyzed chunk id; writing it after every chunk
-    is quadratic in repository size. It should be written when a batch reaches
-    storage, and once more for the final partial batch."""
-    from seagoat.engine import Engine
+def test_cache_snapshots_are_bounded_by_time_not_by_batches(mocker, repo):
+    """The cache is one pickle of the whole repository's data, so each snapshot costs time
+    proportional to the repository, not to the progress since the last one. A snapshot per batch
+    is still quadratic in repository size; the number of snapshots has to be bounded by time.
+    Within one interval only the first batch snapshots, a batch after the interval snapshots
+    again, and the final flush always does."""
+    from seagoat.engine import CACHE_PERSIST_INTERVAL_SECONDS, Engine
 
     repo.add_file_change_commit(
         file_name="many_lines.py",
-        contents="".join(f"value_{i} = {i}\n" for i in range(50)),
+        contents="".join(f"value_{i} = {i}\n" for i in range(200)),
         author=repo.actors["John Doe"],
         commit_message="Add a file that spans several batches",
     )
     engine = Engine(repo.working_dir)
+    clock = mocker.patch("seagoat.engine.time")
+    clock.monotonic.return_value = 1000.0
     persist = mocker.patch.object(engine.cache, "persist")
     engine.repository.analyze_files()
     chunks = [
@@ -94,13 +98,22 @@ def test_cache_is_persisted_per_batch_not_per_chunk(mocker, repo):
         if chunk.chunk_id not in engine.cache.data["chunks_already_analyzed"]
     ]
     batch_size = engine.config["server"]["chroma"]["batchSize"]
-    assert len(chunks) > batch_size, "fixture repo must span more than one batch"
+    assert len(chunks) > 2 * batch_size, "fixture repo must span several batches"
 
-    for chunk in chunks:
+    half = len(chunks) // 2
+    for chunk in chunks[:half]:
         engine.process_chunk(chunk)
-    engine.flush()
+    # the first batch to reach storage snapshots; later ones in the interval do not
+    assert persist.call_count == 1
 
-    full_batches = len(chunks) // batch_size
-    # one persist per full batch that was flushed, plus the final flush
-    assert persist.call_count == full_batches + 1
-    assert persist.call_count < len(chunks)
+    clock.monotonic.return_value = 1000.0 + CACHE_PERSIST_INTERVAL_SECONDS
+    for chunk in chunks[half:]:
+        engine.process_chunk(chunk)
+    # the interval has passed, so the next batch to reach storage snapshots again
+    assert persist.call_count == 2
+
+    engine.flush()
+    # the final flush always snapshots, whatever the clock says
+    assert persist.call_count == 3
+    # ten batches reached storage; the old per-batch scheme snapshotted eleven times
+    assert persist.call_count < len(chunks) // batch_size

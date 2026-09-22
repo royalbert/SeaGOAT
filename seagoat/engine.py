@@ -3,6 +3,7 @@ This module allows you to use seagoat as a library
 """
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import chain
@@ -33,6 +34,15 @@ class RepositoryData(TypedDict):
 
 nest_asyncio.apply()
 
+# The cache is a single pickle of the whole RepositoryData -- file metadata, commit sets, and the
+# analyzed and not-yet-analyzed chunk ids -- so one snapshot costs time proportional to the size of
+# the repository, not to the progress since the last one. Snapshotting once per batch still makes
+# indexing quadratic in repository size; on a 3.7-million-chunk tree it was 42% of worker time at
+# 5% progress. Bound the number of snapshots by time instead. Losing up to this many seconds of
+# bookkeeping in a crash is harmless: the vector store is written by upsert, so a chunk whose id was
+# not persisted is re-embedded and overwritten, not duplicated.
+CACHE_PERSIST_INTERVAL_SECONDS = 30
+
 
 class Engine:
     """
@@ -59,6 +69,7 @@ class Engine:
             },
         )
         self.cache.load()
+        self._last_persist = float("-inf")
         self.repository = Repository(path)
         self.config = get_config_values(Path(path))
 
@@ -87,13 +98,17 @@ class Engine:
                 flushed = True
         return flushed
 
+    def _persist(self):
+        self.cache.persist()
+        self._last_persist = time.monotonic()
+
     def flush(self):
         """Flush every source's buffered chunks and persist the cache once."""
         for source in chain(*self._fetchers.values()):
             flush = source.get("flush_batch")
             if flush is not None:
                 flush()
-        self.cache.persist()
+        self._persist()
 
     def process_chunk(self, chunk):
         if chunk.chunk_id in self.cache.data["chunks_already_analyzed"]:
@@ -105,13 +120,16 @@ class Engine:
         if chunk.chunk_id in self.cache.data["chunks_not_yet_analyzed"]:
             self.cache.data["chunks_not_yet_analyzed"].remove(chunk.chunk_id)
 
-        # Persist the cache when the chunks actually reached storage (once per
-        # batch) rather than after every chunk: the cache is a pickle of every
-        # analyzed id, so rewriting it per chunk is quadratic in the size of the
-        # repository, and persisting before the flush records chunks as analyzed
-        # that are still in memory.
-        if flushed:
-            self.cache.persist()
+        # Persist only when chunks have actually reached storage -- persisting
+        # before the flush would record chunks as analyzed that are still in
+        # memory -- and at most once per CACHE_PERSIST_INTERVAL_SECONDS, because
+        # each snapshot costs the size of the whole repository.
+        if (
+            flushed
+            and time.monotonic() - self._last_persist
+            >= CACHE_PERSIST_INTERVAL_SECONDS
+        ):
+            self._persist()
 
     def _create_vector_embeddings(self, minimum_chunks_to_analyze=None):
         chunks_to_process = []
