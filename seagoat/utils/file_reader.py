@@ -19,7 +19,14 @@ def autodecode_bytes(binary_data: bytes) -> str:
     if detector.result["confidence"] < 0.89:
         encoding = "utf-8"
 
-    return binary_data.decode(encoding)
+    try:
+        return binary_data.decode(encoding)
+    except UnicodeDecodeError:
+        # The detector was overruled (confidence below threshold) or wrong, and the
+        # bytes are not valid in the chosen encoding. Replacing the undecodable
+        # bytes keeps the file indexable; raising here escapes the worker thread and
+        # leaves a server that is running but never analyzes another chunk.
+        return binary_data.decode("utf-8", errors="replace")
 
 
 def read_file_with_correct_encoding(file_path: str) -> str:
