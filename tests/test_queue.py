@@ -70,3 +70,22 @@ def test_important_files_are_analyzed_first(create_task_queue, mocker, repo):
 
     # the exact order of files should also match the priority list
     assert [file.path for file, _ in repository.top_files()] == order_of_files_analyzed
+
+
+def test_worker_crash_is_logged_and_stops_the_process(mocker, repo, caplog):
+    """An exception escaping the worker used to kill only the worker thread and leave
+    a server that answers nothing. It must be logged and terminate the process."""
+    from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE, BaseQueue
+
+    exit_ = mocker.patch("seagoat.queue.base_queue.os._exit")
+
+    class Broken(BaseQueue):
+        def _get_context(self):
+            raise RuntimeError("boom during context setup")
+
+    queue = Broken()
+    queue._worker_thread.join(timeout=5)
+
+    exit_.assert_called_once_with(WORKER_CRASHED_EXIT_CODE)
+    assert "worker thread crashed" in caplog.text
+    assert "boom during context setup" in caplog.text

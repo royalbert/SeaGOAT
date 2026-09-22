@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from queue import Empty, PriorityQueue
@@ -6,6 +7,7 @@ from typing import Any, Dict, Tuple
 from uuid import uuid4
 
 HIGH_PRIORITY = 0.0
+WORKER_CRASHED_EXIT_CODE = 7  # keep in step with seagoat.server.ExitCode.WORKER_CRASHED
 MEDIUM_PRIORITY = 0.5
 LOW_PRIORITY = 1.0
 
@@ -71,6 +73,20 @@ class BaseQueue:
 
     def _worker_function(self):
         logging.info("Starting worker thread...")
+        try:
+            self._worker_loop()
+        except Exception:  # noqa: BLE001 - anything that escapes here would kill the thread silently
+            # The worker is the only thread that analyzes chunks and answers queries.
+            # If it dies, the server process stays up but never does anything again
+            # and clients only see timeouts. Say what happened and stop the process
+            # so the failure is visible and the port is released.
+            logging.exception(
+                "The SeaGOAT worker thread crashed; stopping the server. "
+                "Fix the cause reported above and start the server again."
+            )
+            os._exit(WORKER_CRASHED_EXIT_CODE)
+
+    def _worker_loop(self):
         context = self._get_context()
 
         while True:
