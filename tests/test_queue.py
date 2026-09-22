@@ -1,3 +1,4 @@
+import logging
 from time import sleep
 from unittest.mock import Mock
 
@@ -166,3 +167,88 @@ def test_the_final_partial_batch_reaches_the_vector_store(repo):
     )
     stored = client.get_collection("code_data").count()
     assert stored == len(chunks)
+
+
+class _BrokenQueue:
+    """A queue whose worker dies on its first step."""
+
+    @staticmethod
+    def make(**kwargs):
+        from seagoat.queue.base_queue import BaseQueue
+
+        class Broken(BaseQueue):
+            def _get_context(self):
+                raise RuntimeError("boom during context setup")
+
+        return Broken(**kwargs)
+
+
+def test_worker_crash_is_reported_and_handed_to_on_fatal(caplog):
+    """A dead worker used to leave a server that answers nothing, with nothing in the logs.
+    The crash must be reported and handed to the owner, which decides whether to exit."""
+    from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE
+
+    on_fatal = Mock()
+    _BrokenQueue.make(on_fatal=on_fatal)._worker_thread.join(timeout=5)
+
+    on_fatal.assert_called_once_with(WORKER_CRASHED_EXIT_CODE)
+    assert "worker thread crashed" in caplog.text
+    assert "boom during context setup" in caplog.text
+
+
+def test_a_queue_without_on_fatal_never_ends_its_host_process(mocker):
+    """Only the server may end the process. A queue embedded anywhere else -- a test run, a
+    library user -- must lose only its worker thread."""
+    exit_ = mocker.patch("os._exit")
+
+    queue = _BrokenQueue.make()
+    queue._worker_thread.join(timeout=5)
+
+    assert not queue._worker_thread.is_alive()
+    exit_.assert_not_called()
+
+
+def test_worker_crash_reaches_on_fatal_even_if_a_log_handler_raises():
+    """A log handler that raises while the crash is reported must not stop the report from
+    reaching the owner; otherwise the worker dies silently again."""
+    from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE
+
+    class _Raising(logging.Handler):
+        def emit(self, record):
+            raise OSError("log destination is gone")
+
+        def handleError(self, record):
+            raise OSError("log destination is gone")
+
+    handler = _Raising()
+    logging.getLogger().addHandler(handler)
+    on_fatal = Mock()
+    try:
+        _BrokenQueue.make(on_fatal=on_fatal)._worker_thread.join(timeout=5)
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    on_fatal.assert_called_once_with(WORKER_CRASHED_EXIT_CODE)
+
+
+def test_maintenance_stops_when_the_repository_is_gone():
+    """A vanished repository must stop the worker and be handed to the owner, not fail on every
+    maintenance pass or go on to analyze."""
+    from seagoat.queue.base_queue import REPOSITORY_GONE_EXIT_CODE
+    from seagoat.queue.task_queue import TaskQueue
+    from seagoat.repository import RepositoryGone
+
+    queue = Mock()
+    engine = Mock()
+    engine.repository.get_status_hash.side_effect = RepositoryGone("/tmp/gone")
+    context = {
+        "seagoat_engine": engine,
+        "last_maintenance": None,
+        "last_repo_state_hash": None,
+    }
+
+    TaskQueue.handle_maintenance(queue, context)
+
+    queue._fatal.assert_called_once_with(REPOSITORY_GONE_EXIT_CODE)
+    assert queue._task_queue.put.call_args.args[0].name == "shutdown"
+    engine.analyze_codebase.assert_not_called()

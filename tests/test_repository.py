@@ -338,3 +338,34 @@ def test_max_count_is_added_for_read_max_commits_setting(
     repository.analyze_files()
 
     assert mock.spy_return == expected_extra_args
+
+
+def test_status_hash_reports_a_removed_repository(repo):
+    # A server can outlive the tree it was started on. Once the directory is deleted, every git
+    # call on it fails; that must surface as RepositoryGone, not as an unexplained git error.
+    import shutil
+
+    from seagoat.repository import Repository, RepositoryGone
+
+    my_repo = Repository(repo.working_dir)
+    my_repo.get_status_hash()
+
+    shutil.rmtree(repo.working_dir)
+
+    with pytest.raises(RepositoryGone):
+        my_repo.get_status_hash()
+
+
+def test_other_git_failures_are_not_reported_as_a_removed_repository(repo):
+    # The directory still exists but is no longer a git repository: that is a git error, and it
+    # must stay one rather than being mistaken for a deleted tree.
+    import shutil
+    import subprocess
+
+    from seagoat.repository import Repository
+
+    my_repo = Repository(repo.working_dir)
+    shutil.rmtree(f"{repo.working_dir}/.git")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        my_repo.get_status_hash()
