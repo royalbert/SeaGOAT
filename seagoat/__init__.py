@@ -1,1 +1,1 @@
-__version__ = "1.2.0+firmative.1"
+__version__ = "1.2.0+firmative.2"
