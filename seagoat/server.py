@@ -2,6 +2,7 @@ import sys
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from collections import OrderedDict
 
@@ -29,6 +30,8 @@ import orjson
 
 class ExitCode:
     NOT_A_GIT_REPO = 5
+    RIPGREP_NOT_FOUND = 6
+    WORKER_CRASHED = 7
 
 
 def get_fallback_value(dictionary, key, fallback_value):
@@ -131,6 +134,14 @@ def start_server(repo_path: str, custom_port=None):
             err=True,
         )
         sys.exit(ExitCode.NOT_A_GIT_REPO)
+
+    if shutil.which("rg") is None:
+        click.echo(
+            "SeaGOAT requires ripgrep (the `rg` command) but it was not found on PATH. "
+            "Install it from https://github.com/BurntSushi/ripgrep and try again.",
+            err=True,
+        )
+        sys.exit(ExitCode.RIPGREP_NOT_FOUND)
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     app = create_app(repo_path)

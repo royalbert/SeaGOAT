@@ -1,3 +1,4 @@
+import logging
 from time import sleep
 from unittest.mock import Mock
 
@@ -104,3 +105,57 @@ def test_cache_is_persisted_per_batch_not_per_chunk(mocker, repo):
     # one persist per full batch that was flushed, plus the final flush
     assert persist.call_count == full_batches + 1
     assert persist.call_count < len(chunks)
+
+def test_worker_crash_is_logged_and_stops_the_process(mocker, repo, caplog):
+    """An exception escaping the worker used to kill only the worker thread and leave
+    a server that answers nothing. It must be logged and terminate the process."""
+    from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE, BaseQueue
+
+    exit_ = mocker.patch("seagoat.queue.base_queue.os._exit")
+
+    class Broken(BaseQueue):
+        def _get_context(self):
+            raise RuntimeError("boom during context setup")
+
+    queue = Broken()
+    queue._worker_thread.join(timeout=5)
+
+    exit_.assert_called_once_with(WORKER_CRASHED_EXIT_CODE)
+    assert "worker thread crashed" in caplog.text
+    assert "boom during context setup" in caplog.text
+
+
+def test_worker_crash_report_is_flushed_before_the_process_dies(mocker):
+    """os._exit skips the interpreter's cleanup, and that includes flushing buffered streams.
+    Without an explicit flush the crash report logged a line earlier is discarded and the process
+    dies with no message -- the silent death this handler exists to prevent."""
+    from seagoat.queue.base_queue import WORKER_CRASHED_EXIT_CODE, BaseQueue
+
+    order = []
+
+    class _Recording(logging.Handler):
+        def emit(self, record):
+            pass
+
+        def flush(self):
+            order.append("flushed")
+
+    handler = _Recording()
+    logging.getLogger().addHandler(handler)
+    mocker.patch(
+        "seagoat.queue.base_queue.os._exit",
+        side_effect=lambda code: order.append(("exited", code)),
+    )
+
+    class Broken(BaseQueue):
+        def _get_context(self):
+            raise RuntimeError("boom during context setup")
+
+    try:
+        Broken()._worker_thread.join(timeout=5)
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    # flushed at least once, and every flush before the exit
+    assert "flushed" in order
+    assert order[-1] == ("exited", WORKER_CRASHED_EXIT_CODE)

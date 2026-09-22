@@ -413,3 +413,13 @@ def test_server_shows_error_when_folder_is_not_a_git_repo(runner_with_error):
         result = runner_with_error.invoke(seagoat_server, ["start", new_directory])
 
     assert result.exit_code == 5
+
+
+def test_server_refuses_to_start_without_ripgrep(repo, mocker):
+    from seagoat.server import ExitCode, start_server
+
+    mocker.patch("seagoat.server.shutil.which", return_value=None)
+    with pytest.raises(SystemExit) as exit_info:
+        start_server(repo.working_dir)
+
+    assert exit_info.value.code == ExitCode.RIPGREP_NOT_FOUND
