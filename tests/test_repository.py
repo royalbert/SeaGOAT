@@ -338,3 +338,20 @@ def test_max_count_is_added_for_read_max_commits_setting(
     repository.analyze_files()
 
     assert mock.spy_return == expected_extra_args
+
+
+def test_status_hash_reports_a_removed_repository(repo):
+    # A server outlives the tree it was started on when that tree is deleted. Every git call then
+    # fails, and CalledProcessError escaped the indexing worker: on stock the worker died silently
+    # and the server answered nothing for the rest of its life.
+    import shutil
+
+    from seagoat.repository import Repository, RepositoryGone
+
+    my_repo = Repository(repo.working_dir)
+    my_repo.get_status_hash()
+
+    shutil.rmtree(repo.working_dir)
+
+    with pytest.raises(RepositoryGone):
+        my_repo.get_status_hash()
