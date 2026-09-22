@@ -5,7 +5,15 @@ import time
 import orjson
 
 from seagoat import __version__
-from seagoat.queue.base_queue import LOW_PRIORITY, MEDIUM_PRIORITY, BaseQueue
+from seagoat.queue.base_queue import (
+    HIGH_PRIORITY,
+    LOW_PRIORITY,
+    MEDIUM_PRIORITY,
+    REPOSITORY_GONE_EXIT_CODE,
+    BaseQueue,
+    Task,
+)
+from seagoat.repository import RepositoryGone
 
 SECONDS_BETWEEN_MAINTENANCE = 10
 
@@ -52,7 +60,19 @@ class TaskQueue(BaseQueue):
         ):
             return
 
-        current_repo_state_hash = context["seagoat_engine"].repository.get_status_hash()
+        try:
+            current_repo_state_hash = context[
+                "seagoat_engine"
+            ].repository.get_status_hash()
+        except RepositoryGone as error:
+            # Nothing is left to index or to answer queries about: stop the worker instead of
+            # failing on every maintenance pass, and let the owner end the process.
+            logging.warning("%s; nothing is left to index.", error)
+            self._task_queue.put(
+                Task(priority=HIGH_PRIORITY, name="shutdown", args=(), kwargs={})
+            )
+            self._fatal(REPOSITORY_GONE_EXIT_CODE)
+            return
 
         # Do not re-analyze repo if nothing changed
         if context["last_repo_state_hash"] == current_repo_state_hash:

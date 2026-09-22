@@ -2,6 +2,7 @@ import sys
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from collections import OrderedDict
 
@@ -11,6 +12,7 @@ from waitress import serve
 
 from seagoat import __version__
 from seagoat.cache import Cache, get_cache_root
+from seagoat.queue.base_queue import REPOSITORY_GONE_EXIT_CODE, WORKER_CRASHED_EXIT_CODE
 from seagoat.queue.task_queue import TaskQueue
 from seagoat.utils.config import GLOBAL_CONFIG_FILE, get_config_values
 from seagoat.utils.server import (
@@ -29,6 +31,23 @@ import orjson
 
 class ExitCode:
     NOT_A_GIT_REPO = 5
+    RIPGREP_NOT_FOUND = 6
+    WORKER_CRASHED = WORKER_CRASHED_EXIT_CODE
+    REPOSITORY_GONE = REPOSITORY_GONE_EXIT_CODE
+
+
+def _exit_process(exit_code):
+    """End the server from its worker thread. A server whose worker cannot work any more would
+    otherwise keep its port and answer nothing. os._exit is needed because sys.exit in a thread
+    ends only that thread; it skips interpreter cleanup, including flushing buffered streams, so
+    flush first or the report that preceded this call is lost. Flush rather than calling
+    logging.shutdown(), which would close the handlers."""
+    for flushable in (*logging.getLogger().handlers, sys.stdout, sys.stderr):
+        try:
+            flushable.flush()
+        except Exception:
+            pass
+    os._exit(exit_code)
 
 
 def get_fallback_value(dictionary, key, fallback_value):
@@ -38,14 +57,14 @@ def get_fallback_value(dictionary, key, fallback_value):
     return dictionary[key]
 
 
-def create_app(repo_path):
+def create_app(repo_path, on_fatal=None):
     logging.info("Creating server...")
     app = Flask(__name__)
     app.config["PROPAGATE_EXCEPTIONS"] = True
     app.debug = True
 
     app.extensions["task_queue"] = TaskQueue(
-        repo_path=repo_path, minimum_chunks_to_analyze=0
+        repo_path=repo_path, minimum_chunks_to_analyze=0, on_fatal=on_fatal
     )
 
     def execute_query(limit_clue, **kwargs) -> bytes:
@@ -132,8 +151,16 @@ def start_server(repo_path: str, custom_port=None):
         )
         sys.exit(ExitCode.NOT_A_GIT_REPO)
 
+    if shutil.which("rg") is None:
+        click.echo(
+            "SeaGOAT requires ripgrep (the `rg` command) but it was not found on PATH. "
+            "Install it from https://github.com/BurntSushi/ripgrep and try again.",
+            err=True,
+        )
+        sys.exit(ExitCode.RIPGREP_NOT_FOUND)
+
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    app = create_app(repo_path)
+    app = create_app(repo_path, on_fatal=_exit_process)
     port = custom_port
 
     if port is None:

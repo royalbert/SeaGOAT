@@ -6,6 +6,9 @@ from typing import Any, Dict, Tuple
 from uuid import uuid4
 
 HIGH_PRIORITY = 0.0
+# Exit statuses a server uses when its worker can no longer do its job (see seagoat.server.ExitCode).
+WORKER_CRASHED_EXIT_CODE = 7
+REPOSITORY_GONE_EXIT_CODE = 8
 MEDIUM_PRIORITY = 0.5
 LOW_PRIORITY = 1.0
 
@@ -20,8 +23,12 @@ class Task:
 
 
 class BaseQueue:
-    def __init__(self, **kwargs):
+    def __init__(self, on_fatal=None, **kwargs):
+        """on_fatal(exit_code) is called when the worker can no longer do its job. The server
+        passes a function that ends the process; without one only the worker thread stops, which
+        is what a queue embedded in another process -- a test run, a library user -- needs."""
         self.kwargs = kwargs
+        self._on_fatal = on_fatal
         self._task_queue = PriorityQueue()
         self._worker_thread = threading.Thread(target=self._worker_function)
         self._worker_thread.start()
@@ -69,8 +76,27 @@ class BaseQueue:
             if result_queue is not None:
                 result_queue.put(result)
 
+    def _fatal(self, exit_code):
+        if self._on_fatal is not None:
+            self._on_fatal(exit_code)
+
     def _worker_function(self):
         logging.info("Starting worker thread...")
+        try:
+            self._worker_loop()
+        except Exception:
+            # The worker is the only thread that analyzes chunks and answers queries; once it
+            # has died nothing will again. Report why, then let the owner end the process.
+            try:
+                logging.exception(
+                    "The SeaGOAT worker thread crashed and can no longer analyze or answer "
+                    "queries. Fix the cause reported above and start the server again."
+                )
+            except Exception:
+                pass  # a failing log handler must not prevent the report below from acting
+            self._fatal(WORKER_CRASHED_EXIT_CODE)
+
+    def _worker_loop(self):
         context = self._get_context()
 
         while True:
