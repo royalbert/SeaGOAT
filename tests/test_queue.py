@@ -70,3 +70,99 @@ def test_important_files_are_analyzed_first(create_task_queue, mocker, repo):
 
     # the exact order of files should also match the priority list
     assert [file.path for file, _ in repository.top_files()] == order_of_files_analyzed
+
+
+def test_cache_snapshots_are_bounded_by_time_not_by_batches(mocker, repo):
+    """The cache is one pickle of the whole repository's data, so each snapshot costs time
+    proportional to the repository. Snapshotting after every chunk makes indexing quadratic in
+    repository size. A snapshot is taken only once a batch has reached storage, at most once per
+    interval, and always on the final flush."""
+    from seagoat.engine import CACHE_PERSIST_INTERVAL_SECONDS, Engine
+
+    repo.add_file_change_commit(
+        file_name="many_lines.py",
+        contents="".join(f"value_{i} = {i}\n" for i in range(200)),
+        author=repo.actors["John Doe"],
+        commit_message="Add a file that spans several batches",
+    )
+    engine = Engine(repo.working_dir)
+    clock = mocker.patch("seagoat.engine.time")
+    clock.monotonic.return_value = 1000.0
+    persist = mocker.patch.object(engine.cache, "persist")
+    engine.repository.analyze_files()
+    chunks = [
+        chunk
+        for file, _ in engine.repository.top_files()
+        for chunk in file.get_chunks()
+        if chunk.chunk_id not in engine.cache.data["chunks_already_analyzed"]
+    ]
+    batch_size = engine.config["server"]["chroma"]["batchSize"]
+    assert len(chunks) > 2 * batch_size, "fixture repo must span several batches"
+
+    for chunk in chunks[: batch_size - 1]:
+        engine.process_chunk(chunk)
+    # nothing has reached storage yet, so nothing may be recorded as analyzed on disk
+    assert persist.call_count == 0
+
+    half = len(chunks) // 2
+    for chunk in chunks[batch_size - 1 : half]:
+        engine.process_chunk(chunk)
+    # the first batch to reach storage snapshots; later ones in the interval do not
+    assert persist.call_count == 1
+
+    clock.monotonic.return_value = 1000.0 + CACHE_PERSIST_INTERVAL_SECONDS
+    for chunk in chunks[half:]:
+        engine.process_chunk(chunk)
+    # the interval has passed, so the next batch to reach storage snapshots again
+    assert persist.call_count == 2
+
+    engine.flush()
+    # the final flush always snapshots, whatever the clock says
+    assert persist.call_count == 3
+    # far fewer snapshots than batches, let alone chunks
+    assert persist.call_count < len(chunks) // batch_size
+
+
+def test_the_final_partial_batch_reaches_the_vector_store(repo):
+    """Chunks are written in batches. When the queue runs out of work the last, partial batch must
+    be written too: the cache already records those chunks as analyzed, so a batch left in memory
+    is never retried and those lines are missing from semantic search for good."""
+    from pathlib import Path
+
+    import chromadb
+    from chromadb.config import Settings
+
+    from seagoat.cache import Cache
+    from seagoat.engine import Engine
+    from seagoat.queue.task_queue import TaskQueue
+
+    repo.add_file_change_commit(
+        file_name="lines.py",
+        contents="".join(f"value_{i} = {i}\n" for i in range(54)),
+        author=repo.actors["John Doe"],
+        commit_message="Add a file whose chunks do not fill the last batch",
+    )
+    engine = Engine(repo.working_dir)
+    engine.repository.analyze_files()
+    chunks = [
+        chunk
+        for file, _ in engine.repository.top_files()
+        for chunk in file.get_chunks()
+    ]
+    batch_size = engine.config["server"]["chroma"]["batchSize"]
+    assert len(chunks) % batch_size, "fixture must leave a partial final batch"
+
+    context = {"seagoat_engine": engine}
+    busy, drained = Mock(), Mock()
+    busy._task_queue.qsize.return_value = 1
+    drained._task_queue.qsize.return_value = 0
+    for chunk in chunks[:-1]:
+        TaskQueue.handle_analyze_chunk(busy, context, chunk)
+    TaskQueue.handle_analyze_chunk(drained, context, chunks[-1])
+
+    store = Cache("chroma", Path(repo.working_dir), {}).get_cache_folder()
+    client = chromadb.PersistentClient(
+        path=str(store), settings=Settings(anonymized_telemetry=False)
+    )
+    stored = client.get_collection("code_data").count()
+    assert stored == len(chunks)

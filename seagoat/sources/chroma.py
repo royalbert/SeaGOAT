@@ -78,8 +78,9 @@ def initialize(repository: Repository):
     batch_buffer = {"ids": [], "documents": [], "metadatas": []}
 
     def _flush_batch():
+        """Write the buffered chunks. Returns True if anything was written."""
         if not batch_buffer["ids"]:
-            return
+            return False
         chroma_collection.upsert(
             ids=batch_buffer["ids"],
             documents=batch_buffer["documents"],
@@ -88,6 +89,7 @@ def initialize(repository: Repository):
         batch_buffer["ids"].clear()
         batch_buffer["documents"].clear()
         batch_buffer["metadatas"].clear()
+        return True
 
     def fetch(query_text: str, limit: int):
         # Slightly overfetch results as it will sorted using a different score later
@@ -104,13 +106,16 @@ def initialize(repository: Repository):
     def cache_chunk(chunk):
         batch_buffer["ids"].append(chunk.chunk_id)
         batch_buffer["documents"].append(chunk.chunk)
-        batch_buffer["metadatas"].append({
-            "path": chunk.path,
-            "line": chunk.codeline,
-            "git_object_id": chunk.object_id,
-        })
+        batch_buffer["metadatas"].append(
+            {
+                "path": chunk.path,
+                "line": chunk.codeline,
+                "git_object_id": chunk.object_id,
+            }
+        )
         if len(batch_buffer["ids"]) >= batch_size:
-            _flush_batch()
+            return _flush_batch()
+        return False
 
     def cache_repo():
         # chromadb does not need any repo cache action
